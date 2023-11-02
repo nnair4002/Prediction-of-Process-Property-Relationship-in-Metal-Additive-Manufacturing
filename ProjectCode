@@ -1,0 +1,679 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os # for reading csv files
+import glob # for reading csv files
+import math # for trig on angles
+import re # to search strings for nums
+from functools import reduce # to combine final dfs into a single df
+
+# CONSTANTS
+
+# Constants used throughout the project
+
+# colors use in presentation and graphs
+colors = {'blue':'#0b6374', 'orange':'#c0791b', 'gray':'#666666'}
+# color picker = https://www.w3schools.com/colors/colors_picker.asp
+
+# plot title font size
+tt_fs = 20
+
+# the layer height(mm) for the print was held constant
+layer_height = 0.03
+
+# convert pixels to microns
+scale_factor = 29.2 # microns per pixel normal to print surface
+incident_angle = 9.1 # degrees
+pix_mic_x = scale_factor / math.cos(math.radians(incident_angle))
+pix_mic_y = scale_factor
+pix_mic_a = pix_mic_x * pix_mic_y
+
+# temperature thresholds (C) used to calculate melt pool metrics
+mpm_thresh_temps = {'t1':1600,'t2':1800,'t3':2000,'t4':2200}
+
+#Print Parameters (pp)
+
+# print parameters are settings used to print the part
+
+# read print parameters (PP) file
+pp = pd.read_csv('/content/IncreaseAMYield/data/raw/pp/print_parameters.csv', index_col=0)
+
+# set column type to category
+pp['cond_type'] = pp['cond_type'].astype('category')
+
+# calculate energy densities in pp df
+# LED = linear laser energy density
+# GED = global energy density
+# VED = volumetric laser energy density
+
+# calculate LED
+# LED = LP/SS
+pp['led'] = (pp['laser_power(W)'] / pp['scan_speed(mm/s)']).round(2)
+
+# calculate GED
+# GED = LP/(SS*HS)
+pp['ged'] = (pp['laser_power(W)'] / \
+    (pp['scan_speed(mm/s)'] * pp['hatch_spacing(mm)'])).round(2)
+
+# calculate VED
+# VED = LP/(SS*HS*LH)
+pp['ved'] = (pp['laser_power(W)'] / \
+    (pp['scan_speed(mm/s)'] * pp['hatch_spacing(mm)'] * layer_height )).round(2)
+
+print('PRINT PARAMETERS')
+pp
+
+# RUN LOGS (runs)
+
+# Run log is data collected about the acquisition
+# of the melt pool metrics during the build
+
+# read Run Log (runs) file
+runs = pd.read_csv('/content/IncreaseAMYield/data/raw/runs/runs.csv', index_col=0)
+runs['date'] = pd.to_datetime(runs['date'])
+
+# create new column
+runs.insert(loc=9, column='window_type', value='')
+
+# create window type column based on window size (w,h)
+for i, r in runs.iterrows():
+    w = r['window_w(pixels)']
+    h = r['window_h(pixels)']
+
+    if w==384 and h==370:
+        w_type = 'full'
+    elif w==384 and h==80:
+        w_type = 'quart_1'
+    elif w==80 and h==370:    
+        w_type = 'quart_2'
+    runs.loc[i,'window_type'] = w_type
+
+# set column type to category
+runs['window_type'] = runs['window_type'].astype('category')
+
+print('RUN LOG')
+runs
+
+# MATERIAL PROPERTIES (mp)
+# Read Material Properties (MP) file
+# Material properties file containing porosity
+# Technically November 14/15, 2017 data
+
+mp = pd.read_csv('/content/IncreaseAMYield/data/raw/mp/porosity.csv', index_col=0)
+print('MATERIAL PROPERTIES')
+mp
+
+
+# MELT POOL METRICS (mpm): READ MPM COLUMN LABELS
+# viz col labels
+viz_col = list(pd.read_csv('/content/IncreaseAMYield/data/raw/mpm/cols/viz_cols.csv',
+                           header=None).values.T.flatten())
+
+viz_col
+
+# # threshold col labels
+thresh_col = list(pd.read_csv('/content/IncreaseAMYield/data/raw/mpm/cols/thresh_cols.csv',
+                              header=None).values.T.flatten())
+
+thresh_col
+
+# READ MPM TABLES (v,t)
+
+# viz (v)
+# threshold (t)
+# v and t are side by side tables with identical indexes
+# but different column labels for different data
+
+# empty dictionary to read in raw mpm csv files
+mpm_runs = {}
+
+# file path for csv files
+path = r'/content/IncreaseAMYield/data/raw/mpm/data'
+
+# list of file names to be read
+all_files = glob.glob(os.path.join(path, "*.csv"))
+
+for f in all_files:
+
+    # search for #s in file name
+    run_nums = list(map(int, re.findall('\d+', f)))
+
+    if 'viz' in f:
+        vt = 'v'
+        col_names = viz_col
+    elif 'thresh' in f:
+        vt = 't'
+        col_names = thresh_col
+
+    # name dictionary key
+    key = 'mpm_runs_%d-%d_%s' % (run_nums[1], run_nums[2], vt)
+
+    # add df name to dict, read and add df as value, label columns
+    mpm_runs[key] = pd.read_csv(f, names=col_names, header=None)
+
+
+## EXAMPLE
+print('Example viz table')
+mpm_runs['mpm_runs_20-22_v'].head()
+
+
+# COMBINE V AND T HORIZONTALLY
+
+# empty dictionary to combine mpm(v/t) dfs
+mpm_temp = {}
+
+# run through keys of mpm_runs
+for x in list(mpm_runs.keys()):
+
+    # only combine v with t, not t with v, otherwise there are duplicate dfs
+    if 'v' in x:
+        v_nums = list(map(int, re.findall('\d+', x))) # search for #s in df name
+
+        for y in list(mpm_runs.keys()):
+            t_nums = list(map(int, re.findall('\d+', y))) # search for #s in df name
+
+            if v_nums == t_nums and 't' in y:
+                # name df, drop v and t notations
+                combine_name = 'mpm_runs_%d-%d' % (v_nums[0], v_nums[1])
+
+                # drop duplicate columns between v and t
+                mpm_runs.get(y).drop(['run', 'frame'], axis=1, inplace=True)
+
+                # join v and t, and add to dict
+                mpm_temp[combine_name] = pd.concat([mpm_runs.get(x), mpm_runs.get(y)], axis=1)
+
+# set mpm_runs equal to the temporary df
+mpm_runs = mpm_temp
+
+print('Example mpm_runs table')
+mpm_runs['mpm_runs_16-19'].head()
+
+
+# SPLIT MPM TABLES PER RUN, VERTICALLY
+
+# empty dictionary to split dfs per run
+mpm_temp = {}
+
+# run through keys of mpm_runs
+for x in list(mpm_runs.keys()):
+
+    run_nums = list(map(int, re.findall('\d+', x))) # search for #s in file name
+    run_nums = range(run_nums[0], run_nums[-1]+1) # list of #s in the range 'Runs_n-m'
+
+    # run through the list of run numbers
+    for y in run_nums:
+        key = 'mpm_run_%d' % (y) # name df per run
+        mpm_temp[key] = mpm_runs.get(x)[mpm_runs.get(x)['run'] == y] #split df per run
+
+# set mpm_runs equal to the temporary df
+mpm_runs = mpm_temp
+
+print('Example mpm_run table')
+mpm_runs['mpm_run_16'].head()
+
+# CREATE CONDITION NUM COLUMN
+
+# create a dict from runs df, condition vs run
+cond_run = dict(zip(runs.index, runs.condition))
+
+# run through keys of mpm_runs
+for x in list(mpm_runs.keys()):
+
+    # search for num in df_x name
+    run_num = list(map(int, re.findall('\d+', x)))[0]
+
+    # set condition number based on run number of mpm_runs df
+    cond_num = cond_run[run_num]
+
+    # create condition col in mpm_runs df
+    mpm_runs.get(x).insert(loc=0, column='condition', value=cond_num)
+
+print('Example mpm_run table with added run num col and cond num col')
+mpm_runs['mpm_run_16'].head()
+
+
+# COMBINE ALL MPM TABLES INTO A SINGLE TABLE
+
+# combine add dfs from mpm_runs into a single df, vertically
+mpm = pd.concat(mpm_runs.values(), ignore_index=True)
+
+# set a multi-index in mpm
+mpm = mpm.set_index(['condition','run','layer','frame'])
+
+print('mpm table, a combination of all the mpm data into a single table')
+mpm.head()
+
+
+# DATA WRANGLING: SCAN DIRECTION (CHECK IF THIS CAUSES AN ERROR)
+
+# Convert 'scan_direction(012)' into 'scan_direction(xy)'
+# Update column label
+# Categorize the column
+
+# delete all rows for 0/contours, only analyze internal melt pools
+mpm = mpm[mpm['scan_direction(012)'] != 0]
+
+# dictionary used to convert 012 into xy (x-axis, y-axis)
+scan_dir_conv = {1:'x',2:'y'}
+
+# use scan dict to convert 012 into xy
+mpm['scan_direction(012)'].replace(scan_dir_conv, inplace=True)
+
+
+# rename column with xy instead of 012
+mpm.rename(columns={'scan_direction(012)':'scan_direction(xy)'}, inplace=True)
+
+# set column type to category
+mpm['scan_direction(xy)'] = mpm['scan_direction(xy)'].astype('category')
+
+mpm['scan_direction(xy)'].head()
+
+# Use the exposure time to normalize all intensity cols
+# Update column labels
+
+# intensity count cols
+int_cols = [col for col in mpm.columns if 'counts' in col] # intensity count cols
+
+for col in int_cols:
+    # normalized intensity = intensity / exp_time, set to integer
+    mpm[col] = (mpm[col] / mpm['exp_time(ms)']).astype(int)
+
+    # remane intensity columns with new units
+    mpm.rename(columns={col:col.replace('counts', 'counts/ms')}, inplace=True)
+
+# duplicate column of constant values already in runs df
+del mpm['exp_time(ms)']
+
+# update the intensity count list to include counts/ms
+int_cols = [col for col in mpm.columns if 'counts' in col]
+
+int_cols
+
+# LINEAR DIMENSIONS (PIXELS - MICRONS)
+
+# Convert linear dimensions (length, width) from pixels to microns
+# Update column labels
+
+# linear pixel cols
+lin_pix_cols = [col for col in mpm.columns if ('length' in col) or ('width' in col)]
+
+for col in lin_pix_cols:
+
+    # scale value by x scale factor
+    mpm[col] = np.where(mpm['scan_direction(xy)']=='x', mpm[col] * pix_mic_x, mpm[col])
+
+    # scale value by y scale factor
+    mpm[col] = np.where(mpm['scan_direction(xy)']=='y', mpm[col] * pix_mic_y, mpm[col])
+
+    # remane lin_pix columns
+    mpm.rename(columns={col:col.replace('pixels', 'microns')}, inplace=True)
+
+    # update the lin_pix_cols list
+    lin_pix_cols[lin_pix_cols.index(col)] = col.replace('pixels', 'microns')
+
+lin_pix_cols
+
+
+# LENGTH - WIDTH RATIO (LW_RATIO)
+
+# Calculate length / width ratio in a new column (unit-less)
+# Note: there are rows were the length and/or width is 0
+
+# for each threshold (1-4)
+for i in range(1,5):
+    len = 't' + str(i) + '_length(microns)'
+    wid = 't' + str(i) + '_width(microns)'
+    rat = 't' + str(i) + '_lw_ratio(-)'
+
+    col_list = list(mpm.columns.values)
+    idx = col_list.index(wid) + 1
+
+    mpm.insert(loc=idx, column=rat, value='')
+
+    mpm[rat] = np.where((mpm[len]==0) & (mpm[wid]==0), '', mpm[rat])
+    mpm[rat] = np.where((mpm[len]!=0) & (mpm[wid]==0), mpm[len], mpm[rat])
+    mpm[rat] = np.where(mpm[wid]!=0, mpm[len] / mpm[wid], mpm[rat])
+
+    mpm[rat] = pd.to_numeric(mpm[rat], errors='coerce')
+
+test_lw = mpm[['t4_length(microns)','t4_width(microns)','t4_lw_ratio(-)']]
+test_lw
+#test_lw[test_lw['t4_lw_ratio(-)'] == '']
+
+# AREA DIMENSIONS (PIXELS - MICRONS2)
+
+# Convert area dimensions (area, sat_area) from pixels to microns
+# Update column labels
+
+# area pixel cols
+a_pix_cols = [col for col in mpm.columns if ('area' in col)]
+
+for col in a_pix_cols:
+
+    # scale area by area scale factor
+    mpm[col] *= pix_mic_a
+
+    # remane a_pix columns
+    mpm.rename(columns={col:col.replace('pixels', 'microns2')}, inplace=True)
+
+    # update the a_pix_cols list
+    a_pix_cols[a_pix_cols.index(col)] = col.replace('pixels', 'microns2')
+
+a_pix_cols
+
+# MELT POOL LOCATIONS (PIXELS - MICRONS)
+
+# Locations aren't taken into account, but if needed in the future, un-comment the code below
+
+mpm = mpm.drop(['loc_x(pixels)','loc_y(pixels)'], axis=1)
+mpm.columns.values
+
+# ROUND ALL DIMENSION COLUMNS TO 2 DECIMALS
+
+# list all columns that have units microns or microns2
+micron_cols = [col for col in mpm.columns if 'microns' in col]
+
+for col in micron_cols:
+    mpm[col] = mpm[col].round(2) # round to 2 decimal places
+
+# list all ratio columns
+ratio_cols = [col for col in mpm.columns if 'ratio' in col]
+
+for col in ratio_cols:
+    mpm[col] = mpm[col].round(2) # round to 2 decimal places
+
+# list all orientation columns
+orient_cols = [col for col in mpm.columns if 'orient' in col]
+
+for col in orient_cols:
+    mpm[col] = mpm[col].round(2) # round to 2 decimal places
+
+# CATEGORIZE MPM COLUMNS
+
+# Reorder mpm cols by categories
+# To create multi-level columns, use keys when concatinating,
+# but for now, it's not needed, use the lists instead
+
+# general data cols
+mpm_gen_cols = ['time(s)','scan_direction(xy)']
+
+# intensity cols
+mpm_int_cols = int_cols
+
+# peak temperature cols
+mpm_peak_cols = ['temp_hybref(C)','temp_peak(C)']
+
+
+# threshold cols
+mpm_thresh_cols = [col for col in mpm.columns
+                     if 't1' in col or 't2' in col or 't3' in col or 't4' in col]
+
+# reorder mpm cols per category
+mpm = pd.concat([mpm[mpm_gen_cols],
+                 mpm[mpm_int_cols],
+                 mpm[mpm_peak_cols],
+                 mpm[mpm_thresh_cols]],
+                axis='columns')
+
+print(mpm.info())
+print('--------------------------------------------------')
+mpm.head()
+
+# AVERAGE MPM PER CONDITION
+
+# Average columns/metrics per rows/condition, round to 2 decimal places
+mpm_avg = mpm.groupby('condition').mean().round(2)
+
+# Remove columns where averaging is meaningless
+# technically scan direction can't be averaged by x and y
+# so there is no scan_direction(xy) col
+
+cols_to_del = ['time(s)',
+               'temp_hybref(C)',
+               't1_orient(degrees)','t2_orient(degrees)',
+               't3_orient(degrees)','t4_orient(degrees)']
+
+# delete meaningless columns
+mpm_avg = mpm_avg.drop(cols_to_del, axis=1)
+
+mpm_avg.columns.values
+
+# Combine (pp, mpm, mp) into a Single DF
+
+tables = [pp, mpm_avg, mp]
+
+combined_df = reduce(lambda  left,right: pd.merge(
+    left,right,on=['condition'], how='outer'), tables)
+
+combined_df
+
+
+# PP VS MP TEST MATRIX
+
+pp_mp = pd.concat([pp,mp], axis=1)
+pp_mp.head()
+
+# Compute the correlation matrix
+corr = pp_mp.corr()
+
+# Generate a mask for the upper triangle
+mask = np.zeros_like(corr, dtype=np.bool)
+mask[np.triu_indices_from(mask)] = True
+
+# Set up the matplotlib figure
+f, ax = plt.subplots(figsize=(10,10))
+
+# Generate a custom diverging colormap
+cmap = sns.diverging_palette(220, 10, as_cmap=True)
+
+# Draw the heatmap with the mask and correct aspect ratio
+_ = sns.heatmap(corr, mask=mask, cmap=cmap, center=0,
+            square=True, linewidths=.5, cbar_kws={"shrink": .5}, annot=True, fmt='.2f')
+
+
+!pip install --pre pycaret
+
+
+First Regression Test using PyCaret
+
+pp_mp
+
+from pycaret.regression import *
+from sklearn import datasets  # Import datasets from scikit-learn
+from sklearn.model_selection import train_test_split  # Import train_test_split function
+from sklearn.linear_model import LinearRegression  # Import LinearRegression class
+from sklearn.metrics import accuracy_score  # Import accuracy_score function
+
+
+experiment = setup(pp_mp, target = 'porosity(%)', normalize = True, session_id = 2553, fold = 2)
+
+best_model = compare_models(fold = 2)
+
+dt = create_model('lr', fold = 5)
+
+dt_results = pull()
+print(dt_results)
+
+evaluate_model(best_model)
+
+predict_model(best_model, pp_mp)
+
+#save_model(best_model, model_name = "decision_tree_regressor")
+
+Combinded dataframe test
+
+experiment2 = setup(combined_df, target = 'porosity(%)', normalize = True, session_id = 852)
+
+best_model_2 = compare_models(fold = 2)
+
+evaluate_model(best_model_2)
+
+Model with only the int_avg columns from mpm (intensity)
+
+int_only_combined_df = pd.concat([pp, mpm_avg[['int_s_p(counts/ms)', 'int_l_p(counts/ms)', 'int_s_avg_3(counts/ms)', 'int_l_avg_3(counts/ms)', 'int_s_avg_5(counts/ms)', 'int_l_avg_5(counts/ms)', 'region_mean_short(counts/ms)',
+'region_mean_long(counts/ms)']], mp], axis=1)
+int_only_combined_df
+
+
+int_only_experiment = setup(int_only_combined_df, target = 'porosity(%)', normalize = True, train_size = 0.8, session_id = 3488)
+
+int_only_best_model = compare_models(fold = 2)
+
+evaluate_model(int_only_best_model)
+
+Model with only the temp columns from mpm
+
+temp_combined_df = pd.concat([pp, mpm_avg[['temp_peak(C)']], mp], axis=1)
+temp_combined_df
+
+
+temp_experiment = setup(temp_combined_df, target = 'porosity(%)', normalize = True, train_size = 0.8, session_id = 5424)
+
+temp_best_model = compare_models(fold = 2)
+
+evaluate_model(temp_best_model)
+
+Model with only the t1 columns from mpm
+
+t1_combined_df = pd.concat([pp, mpm_avg[['t1_temp_avg(C)', 't1_length(microns)', 't1_width(microns)', 't1_lw_ratio(-)', 't1_area(microns2)', 't1_sat_num(-)', 't1_sat_area(microns2)']], mp], axis=1)
+t1_combined_df
+
+t1_experiment = setup(t1_combined_df, target = 'porosity(%)', normalize = True, train_size = 0.8, session_id = 2015)
+
+t1_best_model = compare_models(fold = 2)
+
+evaluate_model(t1_best_model)
+
+Model with only t2 from mpm (had trouble getting a good model)
+
+t2_combined_df = pd.concat([pp, mpm_avg[['t2_temp_avg(C)', 't2_length(microns)', 't2_width(microns)', 't2_lw_ratio(-)', 't2_area(microns2)', 't2_sat_num(-)', 't2_sat_area(microns2)']], mp], axis=1)
+t2_combined_df
+
+t2_experiment = setup(t2_combined_df, target = 'porosity(%)', normalize = True, train_size = 0.8, fold = 2, session_id = 2818)
+
+t2_best_model = compare_models(fold = 2)
+
+evaluate_model(t2_best_model)
+
+Model with t3 from mpm
+
+t3_combined_df = pd.concat([pp, mpm_avg[['t3_temp_avg(C)', 't3_length(microns)', 't3_width(microns)', 't3_lw_ratio(-)', 't3_area(microns2)', 't3_sat_num(-)', 't3_sat_area(microns2)']], mp], axis=1)
+t3_combined_df
+
+t3_experiment = setup(t3_combined_df, target = 'porosity(%)', normalize = True, train_size = 0.8, fold = 2, session_id = 282)
+
+t3_best_model = compare_models(fold = 2)
+
+evaluate_model(t3_best_model)
+
+Model with only t4 from mpm
+
+t4_combined_df = pd.concat([pp, mpm_avg[['t4_temp_avg(C)', 't4_length(microns)', 't4_width(microns)', 't4_lw_ratio(-)', 't4_area(microns2)', 't4_sat_num(-)', 't4_sat_area(microns2)']], mp], axis=1)
+t4_combined_df
+
+t4_experiment = setup(t4_combined_df, target = 'porosity(%)', normalize = True, train_size = 0.8, fold = 2, session_id = 8875)
+
+t4_best_model = compare_models(fold = 2)
+
+evaluate_model(t4_best_model)
+
+Model with threshold avg temp from mpm
+
+thresh_avgtemp_combined_df = pd.concat([pp, mpm_avg[['t1_temp_avg(C)', 't2_temp_avg(C)', 't3_temp_avg(C)', 't4_temp_avg(C)']], mp], axis=1)
+thresh_avgtemp_combined_df
+
+thresh_avgtemp_experiment = setup(thresh_avgtemp_combined_df, target = 'porosity(%)', normalize = True, train_size = 0.8, fold = 2, session_id = 1856)
+
+thresh_avgtemp_best_model = compare_models(fold = 2)
+
+evaluate_model(thresh_avgtemp_best_model)
+
+thresh_reglength_combined_df = pd.concat([pp, mpm_avg[['t1_length(microns)', 't2_length(microns)', 't3_length(microns)', 't4_length(microns)']], mp], axis=1)
+thresh_reglength_combined_df
+
+thresh_reglength_experiment = setup(thresh_reglength_combined_df, target = 'porosity(%)', normalize = True, train_size = 0.8, fold = 2, session_id = 4130)
+
+thresh_reglength_best_model = compare_models(fold = 2)
+
+evaluate_model(thresh_reglength_best_model)
+
+thresh_regwidth_combined_df = pd.concat([pp, mpm_avg[['t1_width(microns)', 't2_width(microns)', 't3_width(microns)', 't4_width(microns)']], mp], axis=1)
+thresh_regwidth_combined_df
+
+thresh_regwidth_experiment = setup(thresh_regwidth_combined_df, target = 'porosity(%)', normalize = True, train_size = 0.8, fold = 2, session_id = 4443)
+
+thresh_regwidth_best_model = compare_models(fold = 2)
+
+evaluate_model(thresh_regwidth_best_model)
+
+thresh_regort_combined_df = pd.concat([pp, mpm_avg[['t1_lw_ratio(-)', 't2_lw_ratio(-)', 't3_lw_ratio(-)', 't4_lw_ratio(-)']], mp], axis=1)
+thresh_regort_combined_df
+
+thresh_regort_experiment = setup(thresh_regort_combined_df, target = 'porosity(%)', normalize = True, train_size = 0.8, fold = 2, session_id = 5119)
+
+thresh_regort_best_model = compare_models(fold = 2)
+
+evaluate_model(thresh_regort_best_model)
+
+thresh_regarea_combined_df = pd.concat([pp, mpm_avg[['t1_area(microns2)', 't2_area(microns2)', 't3_area(microns2)', 't4_area(microns2)']], mp], axis=1)
+thresh_regarea_combined_df
+
+thresh_regarea_experiment = setup(thresh_regarea_combined_df, target = 'porosity(%)', normalize = True, train_size = 0.8, fold = 2, session_id = 4709)
+
+thresh_regarea_best_model = compare_models(fold = 2)
+
+evaluate_model(thresh_regarea_best_model)
+
+thresh_numsatreg_combined_df = pd.concat([pp, mpm_avg[['t1_sat_num(-)', 't2_sat_num(-)', 't3_sat_num(-)', 't4_sat_num(-)']], mp], axis=1)
+thresh_numsatreg_combined_df
+
+thresh_numsatreg_experiment = setup(thresh_numsatreg_combined_df, target = 'porosity(%)', normalize = True, train_size = 0.8, fold = 2, session_id = 4053)
+
+thresh_numsatreg_best_model = compare_models(fold = 2)
+
+evaluate_model(thresh_numsatreg_best_model)
+
+thresh_satarea_combined_df = pd.concat([pp, mpm_avg[['t1_sat_area(microns2)', 't2_sat_area(microns2)', 't3_sat_area(microns2)', 't4_sat_area(microns2)']], mp], axis=1)
+thresh_satarea_combined_df
+
+thresh_satarea_experiment = setup(thresh_satarea_combined_df, target = 'porosity(%)', normalize = True, train_size = 0.8, fold = 2, session_id = 5855)
+
+thresh_satarea_best_model = compare_models(fold = 2)
+
+evaluate_model(thresh_satarea_best_model)
+
+mpm_avg.info()
+
+Predicting MPM using PP
+
+peak_short_int = pd.concat([pp, mpm_avg[['int_s_p(counts/ms)']]], axis=1)
+peak_short_int
+
+peak_short_int_experiment = setup(peak_short_int, target = 'int_s_p(counts/ms)', normalize = True, train_size = 0.8, fold = 2, session_id = 8452)
+
+peak_short_int_best_model = compare_models(fold = 2)
+
+evaluate_model(peak_short_int_best_model)
+
+Long int
+
+peak_long_int = pd.concat([pp, mpm_avg[['int_l_p(counts/ms)']]], axis=1)
+peak_long_int
+
+peak_long_int_experiment = setup(peak_long_int, target = 'int_l_p(counts/ms)', normalize = True, train_size = 0.8, fold = 2, session_id = 4695)
+
+peak_long_int_best_model = compare_models(fold = 2)
+
+evaluate_model(peak_long_int_best_model)
+
+Peak Temperature
+
+peak_temp = pd.concat([pp, mpm_avg[['temp_peak(C)']]], axis=1)
+peak_temp
+
+peak_temp_experiment = setup(peak_temp, target = 'temp_peak(C)', normalize = True, train_size = 0.8, fold = 2, session_id = 853)
+
+peak_temp_best_model = compare_models(fold = 2)
+
+evaluate_model(peak_temp_best_model)
